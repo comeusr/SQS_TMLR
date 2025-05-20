@@ -35,3 +35,5 @@ pip install -e .
 ### 3. Look at the summarized result
 The experimental results are summarized in the `log` folder.
 The experimental visualization are summarized in the `plot` folder. 
+
+Remember to change `model_config['model_name']["from_pretrained"]` in `src/utils/config.py` to your own pretrained model.
