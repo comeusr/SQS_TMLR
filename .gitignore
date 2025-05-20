@@ -2,7 +2,6 @@
 .err/
 .out/
 wandb/
-.scripts/wandb/
 logs/
 Data/
 
@@ -10,5 +9,4 @@ Data/
 __pycache__/
 
 # Ignore logs and system files
-scripts/
 tools/

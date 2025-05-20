@@ -50,7 +50,8 @@ model_config={
         "attn_implementation": "eager",
     },
     'meta-llama/Llama-3.2-1B':{
-        "from_pretrained": '/home/ubuntu/SQS-H100/Data/pretrained/GLUE/sst/normal_meta-llama/Llama-3.2-1B/epoch1',
+        "from_pretrained":'/scratch/gilbreth/wang4538/DGMS/Run/GLUE/normal_meta-llama/Llama-3.2-1B/epoch0/',
+        # "from_pretrained": '/home/ubuntu/SQS-H100/Data/pretrained/GLUE/sst/normal_meta-llama/Llama-3.2-1B/epoch1',
         "attn_implementation": "eager",
     }
 

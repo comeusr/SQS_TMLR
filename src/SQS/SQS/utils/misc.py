@@ -96,7 +96,7 @@ def cluster_weights(weights, n_clusters, iter_limit=100):
     start_time = time.time()
     # _cluster_idx, region_saliency = kmeans(X=flat_weight, num_clusters=n_clusters, tol=_tol, \
     #                     distance='euclidean', iter_limit=iter_limit, device=torch.device('cuda'), tqdm_flag=False)
-    _cluster_idx, region_saliency, found_nan = kmeans(X=flat_weight, num_clusters=n_clusters, \
+    _cluster_idx, region_saliency = kmeans(X=flat_weight, num_clusters=n_clusters, \
                         distance='euclidean',  device=flat_weight.device)
     region_saliency = region_saliency.to(flat_weight.device)
     end_time = time.time()
@@ -144,14 +144,8 @@ def cluster_weights_sparsity(weights, n_clusters, iter_limit=100):
         return tmp, tmp, tmp
     start_time = time.time()
 
-    _cluster_idx, region_saliency, found_nan = kmeans(X=flat_weight, num_clusters=n_clusters, \
+    _cluster_idx, region_saliency = kmeans(X=flat_weight, num_clusters=n_clusters, \
                         distance='euclidean',  device=torch.device('cuda'))
-
-    if found_nan:
-        print("Region saliency {}".format(region_saliency))
-        print("Flat Weight {}".format(flat_weight))
-        _cluster_idx, region_saliency, found_nan = kmeans(X=flat_weight, num_clusters=n_clusters, \
-                        distance='euclidean',  device=torch.device('cuda'), debug=True)
 
     
     region_saliency = region_saliency.to(flat_weight.device)

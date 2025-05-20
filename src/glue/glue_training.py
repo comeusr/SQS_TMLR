@@ -209,9 +209,14 @@ def setup_logger(log_dir="./logs", log_filename=None):
     log_filename = f"{log_filename}_{timestamp}.log"
     
     log_path = os.path.join(log_dir, log_filename)
+
+    log_path_split = log_path.split("/")[:-1]
+    log_folder = "/".join(log_path_split)
     
     logger = getLogger(__name__)
     logger.setLevel(logging.INFO)
+
+    os.makedirs(log_folder, exist_ok=True)
 
     # File handler
     fh = logging.FileHandler(log_path)
