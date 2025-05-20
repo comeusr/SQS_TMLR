@@ -19,7 +19,6 @@ class BERT_PRUNER(Algorithm):
         self.f_alpha = 0.1
         self.alpha_f = alpha_f
         self.model = model
-        # self.pruning_scaling = 
         
 
     def caculate_mask_thresh(self, model, sparsity):
@@ -37,11 +36,6 @@ class BERT_PRUNER(Algorithm):
 
         
         all_is = torch.cat([is_dict[name].view(-1) for name in is_dict])
-        # print("Sparsity {}".format(sparsity))
-        # print("All IS {}".format(all_is))
-        # print("all_is dimension {}".format(all_is.shape))
-        # print("If kth less than total {}".format(int(sparsity*all_is.shape[0]) < all_is.shape[0]))
-        # print('K th smallest elemment {}'.format(int(sparsity*all_is.shape[0])))
         mask_thresh = torch.kthvalue(all_is, int(sparsity*all_is.shape[0]))[0].item()
         return mask_thresh, is_dict
 
@@ -65,7 +59,6 @@ class BERT_PRUNER(Algorithm):
                     valuep = valueLayer.pruning_parameter/cfg.PRUNE_SCALE
                     valueLayer.pruning_parameter.grad.add_(torch.log(F.sigmoid(valuep)/(sp))*sigmoid_derivative(valuep))
                     
-                    # layer.pruning_parameter.grad.add_(torch.log((1-sp)/(1-F.sigmoid(p)))*sigmoid_derivative(p))
 
                     queryMu = queryLayer.mu
                     queryMu.grad.add_(queryMu, alpha=1/(queryLayer.init_sigma ** 2))
@@ -101,14 +94,12 @@ class BERT_PRUNER(Algorithm):
         else:
             sparsity = self.final_sparsity
             self.cur_sparsity = sparsity
-        # print('Fraction {}'.format(_frac))
         return sparsity
     
     def apply_mu_sigma_grad(self, model):
          with torch.no_grad():
             for name, m in model.named_modules():
                 if isinstance(m, CustomizeBertSelfAttention):
-                    # print("Applying sparsisty Gradients")
                     queryLayer = m.query.sub_distribution
 
                     queryMu = queryLayer.mu
@@ -199,10 +190,9 @@ class BERT_PRUNER(Algorithm):
             # Calculate the curr sparsity
             self.sparsity_scheduler(step)
             # Generate mask threshold and help dictionary 
-            # is_dict =  {'layer_name': pruning_parameter}
+
             mask_threshold, is_dict = self.caculate_mask_thresh(self.model, self.cur_sparsity)
             # Generate mask for pruning 
-            # mask = {'layer_name': bool matrix}
             self.generate_mask(self.model, mask_threshold, is_dict)
             #Prune with mask
             self.prune_with_mask(self.model)
@@ -242,7 +232,6 @@ class BERT_PRUNER(Algorithm):
                             
         elif event == Event.AFTER_BACKWARD:
             # Add the gradients of KL divergence to pruning parameters
-            # print("Apply Pruning Gradient")
             if cfg.PRUNE and cfg.PRUNE_START_STEP < train_step <= cfg.PRUNE_END_STEP:
                 self.apply_pruning_grad(state.model)
             elif cfg.PRUNE and (train_step <= cfg.PRUNE_START_STEP or train_step > cfg.PRUNE_END_STEP):

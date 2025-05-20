@@ -20,17 +20,18 @@ pip install -e .
 
 ### Base model
 
-- `src/BERT`: use the BERT neural network as the base model.
-- `src/GLUE`: the data oracle API to draw data. 
-- `src/GPT2`:  use the GPT2 neural network as the base model.
-- `src/resnet`: use the residual network as the base model.
+- `src/BERT`: experiments scripts on BERT model evaluated on SQuAD1.1 dataset.
+- `src/GLUE`: experiments scripts on Qwen/Llama model evaluated on GLUE/SST2 dataset.
+- `src/resnet`: experiments scripts on ResNet models evaluated on CIFAR10/100 dataset.
+- `src/baselines/AWQ` experiments scripts on quantize Qwen/Llama model
 
 ### Methods
 
-- `src/SQS/SQS/modelling/DGMS`: the DGMS baseline method.
-- `src/SQS/SQS/modelling/DGMS/GMM.py`: the proposed method in this work.
+- To run the run the 'DGMS' method on Llama3.2-1B evaluated on GLUE/SST: `sh /scripts/glue/glue_sst_DGMS.sh`
+- To run the run the 'SQS' method on Llama3.2-1B evaluated on GLUE/SST: `sh /scripts/glue/glue_sst_SQS.sh`
 
 
 
 ### 3. Look at the summarized result
-The experimental results are summarized in the `out` folders.
+The experimental results are summarized in the `log` folder.
+The experimental visualization are summarized in the `plot` folder. 

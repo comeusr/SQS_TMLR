@@ -117,9 +117,6 @@ def cluster_weights(weights, n_clusters, iter_limit=100):
         sigma_tmp[i] = torch.sum((flat_weight[_idxs]-region_saliency_tmp[i])**2)
 
 
-    # for i in range(flat_weight.size(0)):
-    #     _idx = _cluster_idx[i]
-    #     sigma_tmp[_idx] += (flat_weight[i,0]-region_saliency_tmp[_idx])**2
     sigma_initialization = torch.tensor([torch.true_divide(sigma_tmp[i], _cluster_idx.eq(i).sum()-1) \
                                     for i in range(n_clusters)], device=flat_weight.device).sqrt()
     sigma_zero = sigma_initialization[zero_center_idx]
@@ -145,10 +142,8 @@ def cluster_weights_sparsity(weights, n_clusters, iter_limit=100):
         print("skip k-means")
         tmp = torch.rand(n_clusters)
         return tmp, tmp, tmp
-    # print("Starting K-means")
     start_time = time.time()
-    # _cluster_idx, region_saliency = kmeans(X=flat_weight, num_clusters=n_clusters, tol=_tol, \
-                        # distance='euclidean', iter_limit=iter_limit, device=torch.device('cuda'), tqdm_flag=False)
+
     _cluster_idx, region_saliency, found_nan = kmeans(X=flat_weight, num_clusters=n_clusters, \
                         distance='euclidean',  device=torch.device('cuda'))
 
@@ -161,10 +156,7 @@ def cluster_weights_sparsity(weights, n_clusters, iter_limit=100):
     
     region_saliency = region_saliency.to(flat_weight.device)
 
-    # kmeans_model = KMeans(init_method="rnd", n_clusters=n_clusters)
-    # result = kmeans_model(flat_weight.view(1, -1, 1))
-    # _cluster_idx, region_saliency = result.labels[0], result.centers
-    # flat_weight = flat_weight.view(-1, 1)
+  
     region_saliency = region_saliency.view(-1, 1)
 
     # Plug in the min and max of the weight to the region saliency
@@ -174,26 +166,11 @@ def cluster_weights_sparsity(weights, n_clusters, iter_limit=100):
     region_saliency[-1] = weight_max
 
     end_time = time.time()
-    # print("Time taken for k-means {} seconds".format(end_time - start_time))
-
-    # print("Flat weight {}".format(flat_weight))
-    # print("Region saliency contains nan {}".format(region_saliency))
-
-
-    # if torch.isnan(region_saliency).any():
-
-    # q = torch.linspace(0, 1, n_clusters+2)[1:-1].to(DEVICE)
-    # flat_weight = flat_weight.to(torch.float32).cpu()
-    # region_saliency = torch.quantile(flat_weight.data, q)
-    # region_saliency = torch.histogram(flat_weight, bins=n_clusters)[1][:-1].to(DEVICE)
-
+ 
     print("Region saliency  dim {}".format(region_saliency.shape))
 
-    # flat_weight = flat_weight.to(torch.float16).to(DEVICE)
     region_saliency = region_saliency.view(-1, 1)
-    # # print("Unique cluster idx {}".format(torch.unique(_cluster_idx)))
-    # # print("Flat weight {}".format(flat_weight))
-    # # print("Region saliency {}".format(region_saliency))
+
 
     _cluster_idx = kmeans_predict(flat_weight, region_saliency, device=torch.device('cuda'))
 
@@ -201,7 +178,6 @@ def cluster_weights_sparsity(weights, n_clusters, iter_limit=100):
     
     pi_initialization = torch.tensor([torch.true_divide(_cluster_idx.eq(i).sum(), _cluster_idx.numel()) \
                             for i in range(n_clusters)], device=flat_weight.device)
-    # zero_center_idx = torch.argmin(torch.abs(region_saliency))
     region_saliency_tmp = region_saliency.clone()
 
 
@@ -211,10 +187,6 @@ def cluster_weights_sparsity(weights, n_clusters, iter_limit=100):
         _idxs = _cluster_idx.eq(i)
         sigma_tmp[i] = torch.sum((flat_weight[_idxs, 0]-region_saliency_tmp[i, 0])**2)
 
-
-    # for i in range(flat_weight.size(0)):
-    #     _idx = _cluster_idx[i]
-    #     sigma_tmp[_idx] += (flat_weight[i,0]-region_saliency_tmp[_idx])**2
     sigma_initialization = torch.tensor([torch.true_divide(sigma_tmp[i], _cluster_idx.eq(i).sum()-1) \
                                     for i in range(n_clusters)], device=flat_weight.device).sqrt()
 
