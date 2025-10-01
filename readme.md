@@ -1,4 +1,4 @@
-![logo](logo.pdf)
+![logo](sqs-logo.png)
 # SQS: Efficient Bayesian DNN Compression through Sparse Quantized Sub-distributions
 
 
