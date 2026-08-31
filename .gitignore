@@ -10,3 +10,13 @@ __pycache__/
 
 # Ignore logs and system files
 tools/
+
+# SLURM / experiment outputs
+runs/
+bb_ckpt/
+*.out
+*.err
+*.bak
+# Paper source lives in its own git repo (Overleaf)
+tex/
+Rebuttals/

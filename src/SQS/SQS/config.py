@@ -1,5 +1,6 @@
 """ Global configurations file.
 """
+import os
 
 # Dataset settings
 NUM_CLASSES = {
@@ -46,11 +47,15 @@ model_config={
 
     },
     "Qwen/Qwen2.5-0.5B":{
-        "from_pretrained": "/home/ubuntu/SQS-H100/Data/pretrained/GLUE/sst/Qwen/Qwen2.5-0.5B/epoch0",
+        # Point this at a fine-tuned SST-2 checkpoint for real accuracy; the HF
+        # hub base model works for end-to-end runs (fresh classification head).
+        "from_pretrained": os.environ.get("SQS_QWEN05B_PATH", "Qwen/Qwen2.5-0.5B"),
         "attn_implementation": "eager",
     },
     'meta-llama/Llama-3.2-1B':{
-        "from_pretrained": '/home/ubuntu/SQS-H100/Data/pretrained/GLUE/sst/normal_meta-llama/Llama-3.2-1B/epoch1',
+        # Point at a fine-tuned SST-2 checkpoint via SQS_LLAMA1B_PATH; falls back to the
+        # HF hub base model (resolved from the local cache when HF_HUB_OFFLINE=1).
+        "from_pretrained": os.environ.get("SQS_LLAMA1B_PATH", "meta-llama/Llama-3.2-1B"),
         "attn_implementation": "eager",
     }
 
@@ -110,6 +115,12 @@ SAMPLE = False
 USE_AVERAGE = False
 PRIOR = "spike_slab"
 METHOD = "SQS"
+NO_OUTLIER = False   # R1 ablation: True disables the fp16 outlier window (first_n=last_n=0)
+PRUNE_PRIOR_PRUNED_ONLY = False  # apply spike-slab prior grad only to pruned weights (keep
+                                 # survivors' gate ~1, avoid kept-weight attenuation).
+EVAL_TEMP_SCALE = 1.0  # R3: multiply the GMM softmax temperature at EVAL only. >1 softens the
+                       # responsibilities so multinomial sampling diversifies -> Bayesian
+                       # averaging gains something. Training temperature stays as-is.
 
 def set_status(flag):
     global IS_TRAIN
@@ -121,7 +132,7 @@ def count_layer():
 
 
 def set_config(args):
-    global IS_EMP, IS_NORMAL, K_LEVEL, TAU, LAYER, LAYER_NUM, SKIPPED_LAYERS, INIT_METHOD, PRUNE, PRUNE_SCALE, PRUNE_FREQ, DEBUG, SAMPLE, USE_AVERAGE, PRIOR, METHOD
+    global IS_EMP, IS_NORMAL, K_LEVEL, TAU, LAYER, LAYER_NUM, SKIPPED_LAYERS, INIT_METHOD, PRUNE, PRUNE_SCALE, PRUNE_FREQ, DEBUG, SAMPLE, USE_AVERAGE, PRIOR, METHOD, NO_OUTLIER, PRUNE_PRIOR_PRUNED_ONLY
     IS_EMP = args.empirical
     IS_NORMAL = args.normal
     TAU = args.tau
@@ -137,4 +148,6 @@ def set_config(args):
     USE_AVERAGE=args.average
     PRIOR = args.prior
     METHOD = args.method
+    NO_OUTLIER = getattr(args, 'no_outlier', False)
+    PRUNE_PRIOR_PRUNED_ONLY = getattr(args, 'prior_pruned_only', False)
     

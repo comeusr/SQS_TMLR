@@ -9,19 +9,19 @@ import wandb
 import detectors
 import timm
 import torch.nn as nn
-import config as cfg
+import SQS.config as cfg
 import copy
 import torchvision
 
-from mypath import Path
-from dataloader import make_data_loader
-from modeling import DGMSNet
-from modeling.DGMS import DGMSConv
-from utils.PyTransformer.transformers.torchTransformer import TorchTransformer
-from utils.loss import *
-from utils.misc import freeze_param, get_device
-from utils.watch import Sparsity, EpochMonitor
-from utils.algorithm import GMM_Pruning
+from SQS.mypath import Path
+from SQS.dataloader import make_data_loader
+from SQS.modeling import DGMSNet
+from SQS.modeling.DGMS import DGMSConv
+from SQS.utils.PyTransformer.transformers.torchTransformer import TorchTransformer
+from SQS.utils.loss import *
+from SQS.utils.misc import freeze_param, get_device
+from SQS.utils.watch import Sparsity, EpochMonitor
+from SQS.utils.algorithm import GMM_Pruning
 
 from composer import Trainer
 from composer.loggers import WandBLogger
@@ -170,9 +170,20 @@ def main():
                         help="Whether use Bayesian Average to ensemble model.")
     parser.add_argument('--average_num', type=int, default=10,
                         help="Number of Models for Bayesian Average.")
+    parser.add_argument('--avg_sweep', action='store_true', default=False,
+                        help="R3 ablation: after training, eval at average_num in {1,2,5,10,20,50}.")
+    parser.add_argument('--wanda', action='store_true', default=False,
+                        help="Activation-aware (Wanda) pruning saliency for conv layers.")
+    parser.add_argument('--prior_pruned_only', action='store_true', default=False,
+                        help="Apply spike-slab prior grad only to pruned weights (avoid kept-weight attenuation).")
+    parser.add_argument('--wanda_nbatches', type=int, default=8,
+                        help="Calibration batches for Wanda activation norms.")
     parser.add_argument('--prior', type=str, default="spike_slab",
                         choices=['spike_slab', 'normal'],
                         help='Choose Prior for the KL divergence')
+    parser.add_argument('--method', type=str, default="SQS",
+                        choices=["SQS", "DGMS", "Normal"],
+                        help='Choose Method (SQS enables pruning; drives cfg.PRUNE/METHOD)')
 
     args = parser.parse_args()
     args.cuda = not args.no_cuda and torch.cuda.is_available()
@@ -235,7 +246,54 @@ def main():
     print('    Total params: %.2fM' % (sum(p.numel() for p in model.parameters()) / 1000000.0))
     cfg.IS_NORMAL = False
 
+    # GMM sub-distribution params (mu/pi/sigma/pruning) are allocated on cuda via the
+    # module-level DEVICE constant, but composer only moves the model to GPU inside
+    # .fit(). Move it now so k-means init tensors all live on the same device
+    # (mirrors glue_training.py, which does model.to("cuda") before InitModel).
+    model = model.to(device)
     model.init_mask_params(args.prior_sigma)
+
+    # Wanda for conv: rank pruning by |quantized_w| * sigmoid(gate) * ||X_c|| (input-channel
+    # activation L2 norm) instead of pure magnitude. Conv weights are NOT sorted (unlike the
+    # LLM path), so alignment is trivial: broadcast the per-input-channel norm to [Cout,Cin,Kh,Kw].
+    # GMM.forward already folds sub_distribution.act_norm into sweight_cache, which the pruner ranks.
+    if getattr(args, 'wanda', False):
+        sums, counts, handles = {}, {}, []
+        def _mk_hook(nm):
+            def pre_hook(module, inp):
+                x = inp[0]                                   # [N, Cin, H, W]
+                s = x.detach().float().pow(2).sum(dim=(0, 2, 3))   # [Cin]
+                sums[nm] = s if nm not in sums else sums[nm] + s
+                counts[nm] = counts.get(nm, 0) + x.shape[0] * x.shape[2] * x.shape[3]
+            return pre_hook
+        convs = {}
+        for nm, mod in model.named_modules():
+            if isinstance(mod, DGMSConv):
+                convs[nm] = mod
+                handles.append(mod.register_forward_pre_hook(_mk_hook(nm)))
+        cfg.IS_TRAIN = True
+        model.train()
+        seen = 0
+        with torch.no_grad():
+            for batch in train_loader:
+                inputs = batch[0].to(device)
+                model.network(inputs)
+                seen += 1
+                if seen >= args.wanda_nbatches:
+                    break
+        for h in handles:
+            h.remove()
+        n_assigned = 0
+        for nm, mod in convs.items():
+            if nm not in sums:
+                continue
+            norm = torch.sqrt(sums[nm])                      # [Cin]
+            w = mod.weight                                   # [Cout,Cin,Kh,Kw]
+            act = norm.view(1, -1, 1, 1).expand_as(w).reshape(-1).clone()
+            act = act / (act.mean() + 1e-8)                  # per-layer normalize
+            mod.sub_distribution.act_norm = act.to(device)
+            n_assigned += 1
+        print(f"[Wanda] assigned activation-aware saliency to {n_assigned} conv layers", flush=True)
 
     # for name, p in model.named_parameters():
     #     print
@@ -291,7 +349,7 @@ def main():
         schedulers=lr_scheduler,
         max_duration=args.duration,
         # device_train_microbatch_size = 64,
-        device_train_microbatch_size= 'auto',
+        device_train_microbatch_size=256,
         train_dataloader=train_loader,
         device="gpu" if torch.cuda.is_available() else "mps",
 
@@ -319,6 +377,45 @@ def main():
     )
 
     trainer.fit()
+
+    # R3 ablation: how the Bayesian-average sample count M affects accuracy. Eval-time only
+    # (eval_forward averages M stochastic posterior samples); model + pruning mask are still
+    # in memory, so no checkpoint reload (the mask is a plain attr, not in the state_dict).
+    if getattr(args, 'avg_sweep', False):
+        from torchmetrics.classification import MulticlassAccuracy
+        cfg.IS_TRAIN = False
+        model.eval()
+
+        def _eval():
+            metric = MulticlassAccuracy(num_classes=args.num_classes, average='micro').to(device)
+            with torch.no_grad():
+                for batch in val_loader:
+                    inputs, targets = batch
+                    inputs = inputs.to(device)
+                    targets = targets.to(device)
+                    logits = model.eval_forward((inputs, targets))
+                    metric.update(logits, targets)
+            return metric.compute().item()
+
+        print("=" * 30 + " R3 BAYESIAN-AVERAGE x EVAL-TEMPERATURE SWEEP " + "=" * 30, flush=True)
+        # Reference: the DETERMINISTIC point estimate -- argmax cluster, NO weight sampling.
+        # This is the honest "M=1" baseline the averaging must beat to count as an improvement.
+        cfg.SAMPLE = False
+        cfg.USE_AVERAGE = False
+        cfg.EVAL_TEMP_SCALE = 1.0
+        print(f"[AVG_SWEEP] MAP_no_sample Val_Acc={_eval():.4f}", flush=True)
+
+        # Sampled Bayesian averages: sample M quantizations, average logits. Sweep the eval
+        # temperature (softens the GMM responsibilities so samples diversify) and M. Finer grid
+        # around the useful range to find where the ensemble beats the deterministic MAP.
+        cfg.SAMPLE = True
+        cfg.USE_AVERAGE = True
+        for tscale in [1.0, 3.0, 5.0, 10.0, 30.0, 100.0]:
+            cfg.EVAL_TEMP_SCALE = tscale
+            for M in [1, 5, 20, 50]:
+                model.args.average_num = M
+                print(f"[AVG_SWEEP] temp_scale={tscale} M={M} Val_Acc={_eval():.4f}", flush=True)
+        cfg.EVAL_TEMP_SCALE = 1.0
 
     trainer.close()
 

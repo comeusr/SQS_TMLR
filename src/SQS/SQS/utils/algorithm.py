@@ -27,12 +27,22 @@ class GMM_Pruning(Algorithm):
         is_dict = {}
         for name, m in model.named_modules():
             if isinstance(m, DGMSConv):
-                is_dict[name] = m.sub_distribution.pruning_parameter.detach()
-                # print("is_dict_{} {}".format(name, is_dict[name]))
+                # Rank by magnitude-aware saliency |quantized_w|*sigmoid(pruning_param)
+                # (same as the LLM pruner's sweight_cache), NOT the raw pruning_parameter
+                # which is initialized uniformly -> would prune ~random weights at onset
+                # and collapse the model. Fall back to pruning_parameter if a forward
+                # hasn't populated sweight_cache yet.
+                sub = m.sub_distribution
+                is_dict[name] = getattr(sub, 'sweight_cache', sub.pruning_parameter).detach().reshape_as(sub.pruning_parameter)
         
         all_is = torch.cat([is_dict[name].view(-1) for name in is_dict])
 
-        mask_thresh = torch.kthvalue(all_is, int(sparsity*all_is.shape[0]))[0].item()
+        k = int(sparsity*all_is.shape[0])
+        if k < 1:
+            # sparsity 0 -> prune nothing (threshold below the minimum saliency). Enables the
+            # pure-quantization (no-pruning) setting used for the Bayesian-averaging experiments.
+            return all_is.min().item() - 1.0, is_dict
+        mask_thresh = torch.kthvalue(all_is, k)[0].item()
         return mask_thresh, is_dict
 
     def apply_pruning_grad(self, model: ComposerModel):
@@ -44,7 +54,18 @@ class GMM_Pruning(Algorithm):
                     layer = m.sub_distribution
                     p = layer.pruning_parameter/cfg.PRUNE_SCALE
                     if cfg.PRIOR == "spike_slab":
-                        layer.pruning_parameter.grad.add_(torch.log(F.sigmoid(p)/(sp))*sigmoid_derivative(p))
+                        prior_grad = torch.log(F.sigmoid(p)/(sp))*sigmoid_derivative(p)
+                        # KEPT-WEIGHT ATTENUATION FIX: the spike prior (sp=0.01) pulls EVERY
+                        # gate toward ~0.01, so survivors' gate sigmoid(p) drifts from ~1 down
+                        # toward ~0.5 -> the kept 50% get ~halved (frozen weights can't
+                        # compensate) -> big accuracy loss beyond the sparsity itself. Gate the
+                        # prior by the pruning mask so ONLY weights being pruned are pushed into
+                        # the spike; survivors keep their gate near 1.
+                        if getattr(cfg, "PRUNE_PRIOR_PRUNED_ONLY", False):
+                            mask = getattr(layer, "mask", None)
+                            if mask is not None:
+                                prior_grad = prior_grad * mask.to(prior_grad.dtype).view(prior_grad.shape)
+                        layer.pruning_parameter.grad.add_(prior_grad)
 
 
                     mu = layer.mu

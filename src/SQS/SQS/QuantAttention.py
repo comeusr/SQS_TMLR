@@ -584,8 +584,8 @@ class CustomizedQwen2Attention(Qwen2Attention):
         self.k_proj_size = self.k_proj.weight.size()
         self.v_proj_size = self.v_proj.weight.size()
         self.o_proj_size = self.o_proj.weight.size()
-        self.first_n = 64
-        self.last_n = 64
+        self.first_n = 0 if cfg.NO_OUTLIER else 64
+        self.last_n = 0 if cfg.NO_OUTLIER else 64
         self.q_num = self.q_proj.weight.numel()
         self.k_num = self.k_proj.weight.numel()
         self.v_num = self.v_proj.weight.numel()
@@ -1077,10 +1077,10 @@ class CustomizedLLamaMLP(LlamaMLP):
         self.sorted_down_indices = None
         self.up_weight_num = self.up_proj.weight.numel()
         self.down_weight_num = self.down_proj.weight.numel()
-        self.up_first_n=64
-        self.up_last_n=64
-        self.down_first_n=64
-        self.down_last_n=64
+        self.up_first_n=0 if cfg.NO_OUTLIER else 64
+        self.up_last_n=0 if cfg.NO_OUTLIER else 64
+        self.down_first_n=0 if cfg.NO_OUTLIER else 64
+        self.down_last_n=0 if cfg.NO_OUTLIER else 64
     
     def reconstruct_weight(self, weights: List[torch.Tensor], inverse_sorted_indices, type='up'):
         # TODO: Restore the up_proj_weight given up_weight and self.sorted_up_indices
@@ -1095,10 +1095,17 @@ class CustomizedLLamaMLP(LlamaMLP):
 
             
     
-    def get_outlier_indices(self, scale=5):
-        
+    def get_outlier_indices(self, scale=1.5):
+
+        # R1 ablation: no outlier window -> keep first_n=last_n=0 so all MLP weights
+        # are quantized by the GMM (the two Identity passthrough blocks become empty).
+        if cfg.NO_OUTLIER:
+            self.up_first_n = self.up_last_n = 0
+            self.down_first_n = self.down_last_n = 0
+            return
+
         # Before Call this function, self.up_proj.weight and self.down_proj.weight need to be flattened and sorted
-        
+
         fisrt_quantile_index = (self.up_weight_num-1)//4
         third_quantile_index = (self.up_weight_num-1)*3//4
 
@@ -1184,11 +1191,14 @@ class CustomizedLLamaMLP(LlamaMLP):
             # print("-"*50+"up_mask shape: ", up_mask.shape, "-"*50)
             # print("-"*50+"up selectedweight shape {} ".format(self.up_proj.weight[up_mask].shape), "-"*50)
             if block_idx == 0:
-                self.up_proj.sub_distribution_list.append(gmm_approximation(self.k_level, self.up_proj.weight[0:self.up_first_n].contiguous(), self.temperature, 20, init_method, sigma).to(device=self.up_proj.weight.device))
-                self.down_proj.sub_distribution_list.append(gmm_approximation(self.k_level, self.down_proj.weight[0:self.down_first_n].contiguous(), self.temperature, 20, init_method, sigma).to(device=self.down_proj.weight.device))
+                # With NO_OUTLIER the outlier window is empty; a GMM cannot be fit on a
+                # zero-length slice (k-means would sample from an empty range), so use a
+                # passthrough Identity for the (empty) block instead.
+                self.up_proj.sub_distribution_list.append(nn.Identity() if self.up_first_n == 0 else gmm_approximation(self.k_level, self.up_proj.weight[0:self.up_first_n].contiguous(), self.temperature, 20, init_method, sigma).to(device=self.up_proj.weight.device))
+                self.down_proj.sub_distribution_list.append(nn.Identity() if self.down_first_n == 0 else gmm_approximation(self.k_level, self.down_proj.weight[0:self.down_first_n].contiguous(), self.temperature, 20, init_method, sigma).to(device=self.down_proj.weight.device))
             elif block_idx == self.blocks-1:
-                self.up_proj.sub_distribution_list.append(gmm_approximation(self.k_level, self.up_proj.weight[self.up_weight_num-self.up_last_n:self.up_weight_num].contiguous(), self.temperature, 20, init_method, sigma).to(device=self.up_proj.weight.device))
-                self.down_proj.sub_distribution_list.append(gmm_approximation(self.k_level, self.down_proj.weight[self.down_weight_num-self.down_last_n:self.down_weight_num].contiguous(), self.temperature, 20, init_method, sigma).to(device=self.down_proj.weight.device))
+                self.up_proj.sub_distribution_list.append(nn.Identity() if self.up_last_n == 0 else gmm_approximation(self.k_level, self.up_proj.weight[self.up_weight_num-self.up_last_n:self.up_weight_num].contiguous(), self.temperature, 20, init_method, sigma).to(device=self.up_proj.weight.device))
+                self.down_proj.sub_distribution_list.append(nn.Identity() if self.down_last_n == 0 else gmm_approximation(self.k_level, self.down_proj.weight[self.down_weight_num-self.down_last_n:self.down_weight_num].contiguous(), self.temperature, 20, init_method, sigma).to(device=self.down_proj.weight.device))
             else:
                 if block_idx == self.blocks-2:
                     up_start = self.up_first_n+(block_idx-1)*self.up_step_size
@@ -1234,14 +1244,14 @@ class CustomizedLLamaMLP(LlamaMLP):
         for idx in range(self.blocks):
 
             if idx == 0:
-                identity=False
+                identity = isinstance(self.up_proj.sub_distribution_list[0], nn.Identity)
                 up_start = 0
                 up_end = self.up_first_n
                 down_start = 0
                 down_end = self.down_first_n
                 
             elif idx == self.blocks-1:
-                identity=False
+                identity = isinstance(self.up_proj.sub_distribution_list[self.blocks-1], nn.Identity)
                 up_start = self.up_weight_num-self.up_last_n
                 up_end = self.up_weight_num
                 down_start = self.down_weight_num-self.down_last_n
@@ -1311,10 +1321,10 @@ class CustomizedQwen2MLP(Qwen2MLP):
         self.sorted_down_indices = None
         self.up_weight_num = self.up_proj.weight.numel()
         self.down_weight_num = self.down_proj.weight.numel()
-        self.up_first_n=64
-        self.up_last_n=64
-        self.down_first_n=64
-        self.down_last_n=64
+        self.up_first_n=0 if cfg.NO_OUTLIER else 64
+        self.up_last_n=0 if cfg.NO_OUTLIER else 64
+        self.down_first_n=0 if cfg.NO_OUTLIER else 64
+        self.down_last_n=0 if cfg.NO_OUTLIER else 64
     
     def reconstruct_weight(self, weights: List[torch.Tensor], inverse_sorted_indices, type='up'):
         # TODO: Restore the up_proj_weight given up_weight and self.sorted_up_indices
@@ -1328,10 +1338,17 @@ class CustomizedQwen2MLP(Qwen2MLP):
             return torch.cat(weights, dim=0)[inverse_sorted_indices].view(self.down_proj_size)
 
     
-    def get_outlier_indices(self, scale=5):
-        
+    def get_outlier_indices(self, scale=1.5):
+
+        # R1 ablation: no outlier window -> keep first_n=last_n=0 so all MLP weights
+        # are quantized by the GMM (the two Identity passthrough blocks become empty).
+        if cfg.NO_OUTLIER:
+            self.up_first_n = self.up_last_n = 0
+            self.down_first_n = self.down_last_n = 0
+            return
+
         # Before Call this function, self.up_proj.weight and self.down_proj.weight need to be flattened and sorted
-        
+
         fisrt_quantile_index = (self.up_weight_num-1)//4
         third_quantile_index = (self.up_weight_num-1)*3//4
 

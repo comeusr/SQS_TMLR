@@ -8,6 +8,11 @@ import re
 
 import numpy as np
 
+try:
+    import wandb
+except Exception:
+    wandb = None
+
 import torch
 import torch.nn as nn
 from torch.optim import AdamW, RMSprop, SGD
@@ -385,6 +390,15 @@ def main(args):
     # Setup logger
     logger = setup_logger(log_dir="{}/logs/{}/{}".format(args.base_dir, args.model_name, args.task_name), log_filename=args.run_name)
 
+    # Setup wandb (offline-safe: Anvil compute nodes have no internet, so we log
+    # locally and `wandb sync` from the login node afterward). Disabled iff
+    # WANDB_MODE=disabled. Metrics logged: train loss, eval/train accuracy, sparsity.
+    use_wandb = wandb is not None and os.environ.get("WANDB_MODE", "").lower() != "disabled"
+    if use_wandb:
+        wandb.init(project=getattr(args, "project_name", None) or "SQS-Qwen",
+                   name=args.run_name, config=vars(args))
+    args._use_wandb = use_wandb
+
     # Load the dataset
     raw_datasets = load_dataset("glue", args.task_name, trust_remote_code=True)
 
@@ -439,6 +453,15 @@ def main(args):
     cfg.PRUNE_START_STEP = int(len(train_dataloader)*args.prune_start)
 
     
+    # Wanda-style activation calibration must run on the BASE model (standard forward,
+    # so per-input-channel ||X|| pre-hooks fire) BEFORE the SQS replacement/sort.
+    act_norms = None
+    if getattr(args, 'wanda', False) and not args.normal:
+        model.to("cuda")
+        from SQS.wanda import collect_activation_norms
+        act_norms = collect_activation_norms(model, train_dataloader, args.wanda_nbatches, device)
+        print(f"[Wanda] collected activation norms for {len(act_norms)} projections")
+
     if not args.normal:
         for name, module in tuple(model.named_modules()):
             if name:
@@ -448,6 +471,10 @@ def main(args):
     model.to("cuda")
     if not args.debug:
         InitModel(model, args.sigma)
+    if act_norms is not None:
+        from SQS.wanda import assign_activation_norms
+        n_blk = assign_activation_norms(model, act_norms, device)
+        print(f"[Wanda] assigned activation-aware saliency to {n_blk} GMM blocks")
     
     # for name, param in model.named_parameters():
     #     print(name, param.device)
@@ -556,8 +583,13 @@ def model_train(logger,train_dataloader, eval_dataloader, model, pruner, optimiz
             loss = outputs.loss
 
             logger.info("[Train] Epoch {}, Step {}, Loss: {:.4f}".format(epoch+1, step, loss.item()))
+            if getattr(args, "_use_wandb", False):
+                _log = {"train/loss": loss.item(), "epoch": epoch + 1}
+                if not normal:
+                    _log["sparsity/target"] = getattr(pruner, "cur_sparsity", 0.0)
+                wandb.log(_log, step=curr_step)
 
-            loss.backward(loss, retain_graph=True)
+            loss.backward(retain_graph=True)
 
             # for name, param in model.named_parameters():
             #     if param.grad is not None:
@@ -598,14 +630,21 @@ def model_train(logger,train_dataloader, eval_dataloader, model, pruner, optimiz
 
             progress_bar.update(1)
 
-            if step % 25 == 0:
+            if step % args.eval_steps == 0:
                 print("-"*50+"Evaluating Model"+"-"*50)
                 accuracy = evaluate(model, eval_dataloader, device, num_labels, is_train=False)
                 logger.info("[Eval] Epoch {}, Step {}, Accuracy: {:.4f}".format(epoch+1, step, accuracy))
                 train_accuracy = evaluate(model, eval_dataloader, device, num_labels, is_train=True)
                 logger.info("[Train] Epoch {}, Step {}, Accuracy: {:.4f}".format(epoch+1, step, train_accuracy))
+                _wb = {"eval/accuracy": float(accuracy), "train/accuracy": float(train_accuracy)}
                 if not cfg.IS_NORMAL:
                     sparsity_ratio, model_params = check_sparsity_per_layer(model, logger)
+                    try:
+                        _wb["sparsity/measured"] = float(sparsity_ratio)
+                    except Exception:
+                        pass
+                if getattr(args, "_use_wandb", False):
+                    wandb.log(_wb, step=curr_step)
 
         # if pruner.cur_sparsity == args.final_sparsity:
         check_point_path = args.save_folder+"/epoch"+str(epoch)
@@ -619,7 +658,7 @@ def model_train(logger,train_dataloader, eval_dataloader, model, pruner, optimiz
     Final_ACC = evaluate(model, eval_dataloader, device, num_labels)
     logger.info(f"Final Accuracy: {Final_ACC:.4f}")
 
-def evaluate(model, eval_dataloader, device, num_labels, is_train):
+def evaluate(model, eval_dataloader, device, num_labels, is_train=False):
 
     if not is_train:
         model.eval()
@@ -754,6 +793,16 @@ if __name__ == "__main__":
                         help='Base Directory')
     parser.add_argument('--sample_data_num', type=int, default=30000,
                         help='Number of samples to use for training.')
+    parser.add_argument('--eval_steps', type=int, default=25,
+                        help='Run evaluation every N training steps.')
+    parser.add_argument('--wanda', action='store_true', default=False,
+                        help='Activation-aware (Wanda-style) pruning saliency.')
+    parser.add_argument('--wanda_nbatches', type=int, default=8,
+                        help='Calibration batches for Wanda activation norms.')
+    parser.add_argument('--no_outlier', action='store_true', default=False,
+                        help='R1 ablation: disable the fp16 outlier window (first_n=last_n=0).')
+    parser.add_argument('--prior_pruned_only', action='store_true', default=False,
+                        help='Apply spike-slab prior grad only to pruned weights (kept-weight-attenuation fix).')
 
     args = parser.parse_args()
 

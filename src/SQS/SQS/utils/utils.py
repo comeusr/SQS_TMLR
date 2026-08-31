@@ -73,15 +73,14 @@ def get_distribution(nums: torch.tensor, Pm: torch.tensor, K: int, pi_normalized
     
 
     if method == "SQS":
-        if nums.isnan().any():
-            print("Utils Found Nan in nums before Normal_pdf {}".format(nums))
-        B = len(nums)
-        responsibility = torch.zeros([K, B], device=DEVICE)
-
-        for k in range(K):
-            responsibility[k] = Normal_pdf(nums, pi_normalized[k], Pm[k], sigma[k], DEVICE)
-            if responsibility[k].isnan().any():
-                print("Utils get_distribution Responsibility {}".format(nums))
+        # Vectorized over the K mixture components (was a Python for-k loop with a
+        # per-k isnan sync — the main remaining LLM bottleneck at K=64).
+        nums_ = nums.view(1, -1)                       # [1, B]
+        mu_ = Pm.view(-1, 1)                           # [K, 1]
+        sig_ = sigma.view(-1, 1).to(torch.float32)     # [K, 1]
+        pi_ = pi_normalized.view(-1, 1)                # [K, 1]
+        responsibility = pi_ * torch.exp(-(nums_ - mu_) ** 2 / (2 * sig_ ** 2)) \
+            / torch.sqrt(2 * math.pi * sig_ ** 2)      # [K, B]
     else:
         B = len(nums)
         responsibility = torch.zeros([K, B], device=DEVICE)

@@ -76,6 +76,37 @@ def check_cuda_memory():
     print("Total CUDA Memory {:.3f} GBs, Used Memory {:.3f} GBs".format(reserved, allocated))
 
 @torch.no_grad()
+def _robust_kmeans(X, num_clusters, distance='euclidean', tol=1e-4, device=None, iter_limit=25):
+    """Bounded, empty-cluster-safe k-means. Drop-in for kmeans_pytorch.kmeans,
+    which (v0.3) loops forever when a cluster empties: an empty cluster's center
+    becomes NaN via mean() of an empty tensor, so center_shift is NaN and the
+    `center_shift**2 < tol` stop condition never fires. Here we re-seed empty
+    clusters with a random point and cap the iteration count."""
+    if device is None:
+        device = X.device
+    X = X.float().to(device)
+    n, d = X.shape
+    centers = X[torch.randint(0, n, (num_clusters,), device=X.device)].clone()
+    choice = torch.zeros(n, dtype=torch.long, device=X.device)
+    for _ in range(iter_limit):
+        choice = torch.argmin(torch.cdist(X, centers), dim=1)          # [N]
+        prev = centers.clone()
+        # vectorized centroid update (no python loop over clusters)
+        sums = torch.zeros_like(centers).scatter_add_(
+            0, choice.unsqueeze(1).expand(-1, d), X)                   # [k, d]
+        counts = torch.zeros(num_clusters, device=X.device).scatter_add_(
+            0, choice, torch.ones(n, device=X.device))                # [k]
+        nonempty = counts > 0
+        centers[nonempty] = sums[nonempty] / counts[nonempty].unsqueeze(1)
+        empty = (~nonempty).nonzero(as_tuple=True)[0]
+        if empty.numel() > 0:                                         # re-seed empties
+            centers[empty] = X[torch.randint(0, n, (empty.numel(),), device=X.device)]
+        if float(((centers - prev) ** 2).sum()) < tol:
+            break
+    return choice.cpu(), centers.cpu()
+
+
+@torch.no_grad()
 def cluster_weights(weights, n_clusters, iter_limit=100):
     """ Initialization of GMM with k-means algorithm, note this procedure may bring
     different initialization results, and the results may be slightly different.
@@ -96,8 +127,8 @@ def cluster_weights(weights, n_clusters, iter_limit=100):
     start_time = time.time()
     # _cluster_idx, region_saliency = kmeans(X=flat_weight, num_clusters=n_clusters, tol=_tol, \
     #                     distance='euclidean', iter_limit=iter_limit, device=torch.device('cuda'), tqdm_flag=False)
-    _cluster_idx, region_saliency = kmeans(X=flat_weight, num_clusters=n_clusters, \
-                        distance='euclidean',  device=flat_weight.device)
+    _cluster_idx, region_saliency = _robust_kmeans(X=flat_weight, num_clusters=n_clusters, \
+                        distance='euclidean', device=flat_weight.device)
     region_saliency = region_saliency.to(flat_weight.device)
     end_time = time.time()
     print("Time taken for k-means {}".format(end_time - start_time))
@@ -144,8 +175,8 @@ def cluster_weights_sparsity(weights, n_clusters, iter_limit=100):
         return tmp, tmp, tmp
     start_time = time.time()
 
-    _cluster_idx, region_saliency = kmeans(X=flat_weight, num_clusters=n_clusters, \
-                        distance='euclidean',  device=torch.device('cuda'))
+    _cluster_idx, region_saliency = _robust_kmeans(X=flat_weight, num_clusters=n_clusters, \
+                        distance='euclidean', device=torch.device('cuda'))
 
     
     region_saliency = region_saliency.to(flat_weight.device)

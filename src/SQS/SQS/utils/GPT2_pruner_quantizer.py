@@ -94,6 +94,18 @@ class GPT2_PRUNER():
         mask_thresh = torch.kthvalue(all_is, int(sparsity*all_is.shape[0]))[0].item()
         return mask_thresh, is_dict
 
+    def _add_prior_grad(self, sub, sp):
+        # Spike-slab prior gradient on the gate. KEPT-WEIGHT ATTENUATION FIX: when
+        # PRUNE_PRIOR_PRUNED_ONLY, gate the prior by the pruning mask so only weights being
+        # pruned are driven into the spike; survivors keep gate~1 (else the prior halves them).
+        p = sub.pruning_parameter / cfg.PRUNE_SCALE
+        g = torch.log(F.sigmoid(p)/(0.01)) * sigmoid_derivative(p)
+        if getattr(cfg, "PRUNE_PRIOR_PRUNED_ONLY", False):
+            mask = getattr(sub, "mask", None)
+            if mask is not None:
+                g = g * mask.to(g.dtype).view(g.shape)
+        sub.pruning_parameter.grad.add_(g)
+
     def apply_pruning_grad(self, model):
         
         with torch.no_grad():
@@ -117,26 +129,22 @@ class GPT2_PRUNER():
                     for i, sub in enumerate(m.k_proj.sub_distribution_list):
                         if isinstance(sub, nn.Identity):
                             continue
-                        projP = sub.pruning_parameter/cfg.PRUNE_SCALE
-                        sub.pruning_parameter.grad.add_(torch.log(F.sigmoid(projP)/(sp))*sigmoid_derivative(projP))
+                        self._add_prior_grad(sub, sp)
 
                     for i, sub in enumerate(m.q_proj.sub_distribution_list):
                         if isinstance(sub, nn.Identity):
                             continue
-                        projP = sub.pruning_parameter/cfg.PRUNE_SCALE
-                        sub.pruning_parameter.grad.add_(torch.log(F.sigmoid(projP)/(sp))*sigmoid_derivative(projP))
+                        self._add_prior_grad(sub, sp)
                     
                     for i, sub in enumerate(m.o_proj.sub_distribution_list):
                         if isinstance(sub, nn.Identity):
                             continue
-                        projP = sub.pruning_parameter/cfg.PRUNE_SCALE
-                        sub.pruning_parameter.grad.add_(torch.log(F.sigmoid(projP)/(sp))*sigmoid_derivative(projP))
+                        self._add_prior_grad(sub, sp)
                     
                     for i, sub in enumerate(m.v_proj.sub_distribution_list):
                         if isinstance(sub, nn.Identity):
                             continue
-                        projP = sub.pruning_parameter/cfg.PRUNE_SCALE
-                        sub.pruning_parameter.grad.add_(torch.log(F.sigmoid(projP)/(sp))*sigmoid_derivative(projP))
+                        self._add_prior_grad(sub, sp)
                         
 
                 elif isinstance(m, CustomizedLlamaAttention):
@@ -165,14 +173,12 @@ class GPT2_PRUNER():
                     for i, sub in enumerate(m.up_proj.sub_distribution_list):
                         if isinstance(sub, nn.Identity):
                             continue
-                        pruning_parameter = sub.pruning_parameter/cfg.PRUNE_SCALE
-                        sub.pruning_parameter.grad.add_(torch.log(F.sigmoid(pruning_parameter)/(sp))*sigmoid_derivative(pruning_parameter))
+                        self._add_prior_grad(sub, sp)
                     
                     for i, sub in enumerate(m.down_proj.sub_distribution_list):
                         if isinstance(sub, nn.Identity):
                             continue 
-                        pruning_parameter = sub.pruning_parameter/cfg.PRUNE_SCALE
-                        sub.pruning_parameter.grad.add_(torch.log(F.sigmoid(pruning_parameter)/(sp))*sigmoid_derivative(pruning_parameter))
+                        self._add_prior_grad(sub, sp)
 
         return      
     

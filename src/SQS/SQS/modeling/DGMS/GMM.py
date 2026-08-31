@@ -165,7 +165,12 @@ class GaussianMixtureModel(nn.Module):
         O = get_distribution(self.nums, self.mu, self.num_components, pi_normalized, self.sigma, self.sigma_zero, self.method, DEVICE)
         O = torch.div(O, O.sum(dim=0) + cfg.EPS)
 
-        temp = F.softmax(O / self.temperature, dim=0).T
+        # R3: at eval, optionally raise the softmax temperature (EVAL_TEMP_SCALE>1) so the
+        # responsibilities soften and multinomial sampling produces diverse quantizations ->
+        # Bayesian averaging over average_num copies actually reduces variance. Training uses
+        # the sharp temperature unchanged (IS_TRAIN=True -> scale 1.0).
+        temp_eff = self.temperature * (cfg.EVAL_TEMP_SCALE if not cfg.IS_TRAIN else 1.0)
+        temp = F.softmax(O / temp_eff, dim=0).T
         return temp
 
 
@@ -195,11 +200,15 @@ class GaussianMixtureModel(nn.Module):
                     temp = reconstruct(weights.shape, region_belonging@self.mu, self.bin_indices, DEVICE)
                     Sweight =  temp* F.sigmoid(self.pruning_parameter.flatten()/cfg.PRUNE_SCALE)
                     self.sweight_cache = torch.abs(temp)*F.sigmoid(self.pruning_parameter.flatten()/cfg.PRUNE_SCALE)
+                    # Activation-aware (Wanda-style) saliency: scale magnitude by the
+                    # input-channel activation norm ||X_j|| so the pruner keeps weights
+                    # that are large AND actually used. No-op unless calibrated.
+                    if getattr(self, 'act_norm', None) is not None:
+                        self.sweight_cache = self.sweight_cache * self.act_norm.flatten().to(self.sweight_cache.dtype)
                 else:
                     Sweight = torch.mul(region_belonging, self.mu.unsqueeze(1)).sum(dim=0)* F.sigmoid(self.pruning_parameter.flatten()/cfg.PRUNE_SCALE) \
                             + (1-F.sigmoid(self.pruning_parameter.flatten()/cfg.PRUNE_SCALE))*torch.randn_like(weights.flatten())
 
-                torch.cuda.empty_cache()
 
 
                 return Sweight.view(weights.size())
@@ -218,6 +227,26 @@ class GaussianMixtureModel(nn.Module):
                 Pweight = reconstruct(weights.size(), mask_w@self.mu, self.bin_indices, DEVICE)
 
                 Pweight = Pweight.view(weights.size())
+
+                # Realize spike-and-slab sparsity at inference. The train branch gates the
+                # weight by sigmoid(pruning_parameter/PRUNE_SCALE); pruned entries are driven
+                # to pruning_parameter<0 (gate<0.5). Without applying the hard gate here the
+                # learned sparsity is silently discarded at eval, so measured non-zero stays
+                # ~100% (NZ ratio 1.0) even though the sparsity schedule ran. Apply it so the
+                # evaluated model is actually sparse and check_total_zero sees exact zeros.
+                if cfg.METHOD == "SQS" and cfg.PRIOR == "spike_slab":
+                    # Match the TRAIN branch, which gates every weight by the SOFT
+                    # sigmoid(pruning_parameter/PRUNE_SCALE) (line ~196). The KL/spike-slab
+                    # prior drives KEPT weights' pruning_parameter down from its init (5*scale
+                    # -> gate~0.993) toward 0 (gate->0.5), so the network trains with kept
+                    # weights scaled by ~0.5-0.99. Using a hard 1.0 gate at eval made kept
+                    # weights up to ~2x too large -> activation blow-up -> ResNet collapsed to
+                    # ~1% at prune onset. Applying the same soft gate here aligns eval with
+                    # train; the hard (~mask) still forces the pruned entries to EXACT zero so
+                    # check_total_zero measures the intended sparsity.
+                    soft = torch.sigmoid(self.pruning_parameter.flatten() / cfg.PRUNE_SCALE).view(weights.size())
+                    gate = (~self.mask).to(Pweight.dtype).view(weights.size())
+                    Pweight = Pweight * soft * gate
 
                 return Pweight
 
